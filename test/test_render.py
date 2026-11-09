@@ -9,8 +9,9 @@ from gst_player import GstPlayer
 
 from .icetest import IceTestCase
 
-MEDIA = Path('test/media')
+from time import sleep
 
+MEDIA = Path('test/media')
 
 class TestRender(IceTestCase):
     provider_port = 10000
@@ -44,7 +45,6 @@ class TestRender(IceTestCase):
 
     def bind(self):
         self.sut.bind_media_provider(self.provider)
-
 
 class PlaybackTestsBase(TestRender):
     def test_id(self):
@@ -93,3 +93,146 @@ class PlaybackTestsBase(TestRender):
         self.sut.load_track(identify(MEDIA / '2s.mp3'))
 
         self.assertEqual(self.sut.get_current_track().id, identify(MEDIA / '2s.mp3'))
+
+State = Spotifice.PlaybackState
+
+class StateTestsBase(TestRender):
+    def setUp(self):
+        super().setUp()
+        self.bind()
+        self.a = identify(MEDIA / '4s.mp3')
+        self.b = identify(MEDIA / '2s.mp3')
+        self.c = identify(MEDIA / '1s.mp3')
+        self.sut.load_track(self.a)
+
+    def assertStatus(self, state, track_id):
+        status = self.sut.get_status()
+        self.assertEqual(status.state, state)
+        self.assertEqual(status.current_track.id, track_id)
+
+    # --- Cuadro 1 ---
+
+    def test_play_from_paused(self):
+        self.sut.play()
+        self.sut.pause()
+        self.sut.play()
+        self.assertStatus(State.PLAYING, self.a)
+
+    def test_pause_when_playing(self):
+        self.sut.play()
+        self.sut.pause()
+        self.assertStatus(State.PAUSED, self.a)
+
+    def test_pause_is_idempotent(self):
+        self.sut.play()
+        self.sut.pause()
+        self.sut.pause()
+        self.assertStatus(State.PAUSED, self.a)
+
+    def test_pause_when_stopped(self):
+        with self.assertRaises(Spotifice.PlayerError) as cm:
+            self.sut.pause()
+
+        self.assertEqual(cm.exception.reason, "Cannot pause when stopped")
+
+    def test_stop_when_paused(self):
+        self.sut.play()
+        self.sut.pause()
+        self.sut.stop()
+        self.assertStatus(State.STOPPED, self.a)
+
+    def test_load_track_when_stopped(self):
+        self.sut.load_track(self.b)
+        self.assertStatus(State.STOPPED, self.b)
+
+    def test_load_track_when_playing(self):
+        self.sut.play()
+        self.sut.load_track(self.b)
+        self.assertStatus(State.PLAYING, self.b)
+
+    def test_load_track_when_paused(self):
+        self.sut.play()
+        self.sut.pause()
+        self.sut.load_track(self.b)
+        self.assertStatus(State.PAUSED, self.b)
+
+    def test_previous_keeps_state(self):
+        self.sut.load_track(self.b)
+        self.sut.play()
+        self.sut.previous()
+        self.assertStatus(State.PLAYING, self.a)
+
+    # --- Cuadro 3 (los ejemplos con solo dos pistas) ---
+
+    def test_previous(self):
+        self.sut.load_track(self.b)
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.a)
+
+    def test_previous_twice(self):
+        self.sut.load_track(self.b)
+        self.sut.previous()
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.a)
+
+    def test_reloading_current_track_keeps_history(self):
+        self.sut.load_track(self.b)
+        self.sut.load_track(self.b)
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.a)
+
+    def test_bind_clears_history(self):
+        self.sut.load_track(self.b)
+        self.bind()
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.b)
+
+    # --- Repetición y final de pista ---
+
+    def test_repeat_is_disabled_by_default(self):
+        self.assertFalse(self.sut.get_status().is_repeating)
+
+    def test_track_end_without_repeat(self):
+        self.sut.load_track(self.b)
+        self.sut.play()
+        sleep(4)
+        self.assertStatus(State.STOPPED, self.b)
+
+    def test_track_end_with_repeat(self):
+        self.sut.load_track(self.b)
+        self.sut.set_repeat(True)
+        self.sut.play()
+        sleep(4)
+        self.assertStatus(State.PLAYING, self.b)
+
+    # --- Cuadro 3 (ejemplos con tres pistas) ---
+
+    def test_previous_after_three_loads(self):
+        self.sut.load_track(self.b)
+        self.sut.load_track(self.c)
+        self.sut.previous()
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.a)
+
+    def test_load_after_previous(self):
+        self.sut.load_track(self.b)
+        self.sut.previous()
+        self.sut.load_track(self.c)
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.a)
+
+    # --- Casos límite ---
+
+    def test_previous_without_history_does_nothing(self):
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.a)
+
+    def test_unbind_stops_playback_and_clears_history(self):
+        self.sut.load_track(self.b)
+        self.sut.play()
+        self.sut.unbind_media_provider()
+        self.assertEqual(self.sut.get_status().state, State.STOPPED)
+
+        self.bind()
+        self.sut.previous()
+        self.assertStatus(State.STOPPED, self.b)
