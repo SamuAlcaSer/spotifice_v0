@@ -5,9 +5,8 @@ from time import sleep
 
 import Ice
 
-Ice.loadSlice(f'-I{Ice.getSliceDir()} spotifice_v0.ice')
+Ice.loadSlice(f'-I{Ice.getSliceDir()} spotifice_v1.ice')
 import Spotifice  # type: ignore # noqa: E402
-
 
 def get_proxy(ic, property, cls):
     proxy = ic.propertyToProxy(property)
@@ -16,15 +15,21 @@ def get_proxy(ic, property, cls):
         try:
             proxy.ice_ping()
             break
+
         except Ice.ConnectionRefusedException:
             sleep(0.5)
 
     object = cls.checkedCast(proxy)
+
     if object is None:
         raise RuntimeError(f'Invalid proxy for {property}')
 
     return object
 
+def show_status(render, step):
+    status = render.get_status()
+    title = status.current_track.title if status.current_track else None
+    print(f"{step:<32} -> {status.state}, {title}, repeat={status.is_repeating}")
 
 def main(ic):
     provider = get_proxy(ic, 'Spotifice.MediaProvider.Proxy', Spotifice.MediaProviderPrx)
@@ -32,30 +37,46 @@ def main(ic):
 
     print("Fetching all tracks...")
     tracks = provider.get_all_tracks()
+
     for t in tracks:
         print(f"- {t.title}")
 
-    if not tracks:
-        print("No tracks found.")
+    if len(tracks) < 2:
+        print("At least two tracks are needed.")
         return
 
-    print(f"Requesting info for track {tracks[0].id}")
-    print(f"Track title: {tracks[0].title}")
+    track1, track2 = tracks[0], tracks[1]
 
     render.bind_media_provider(provider)
     render.stop()
+    show_status(render, "stop()")
 
-    print("Loading track into MediaRender...")
-    render.load_track(tracks[0].id)
+    render.load_track(track1.id)
+    show_status(render, "load_track(track1)")
+
     render.play()
-    sleep(5)  # Let it play for 5 seconds
+    show_status(render, "play()")
+    sleep(3)
+
+    render.load_track(track2.id)
+    show_status(render, "load_track(track2)")
+    sleep(3)
+
+    render.pause()
+    show_status(render, "pause()")
+    sleep(2)
+
+    render.previous()
+    show_status(render, "previous()")
+
+    render.play()
+    show_status(render, "play()")
+
+    render.set_repeat(True)
+    show_status(render, "set_repeat(True)")
 
     render.stop()
-    render.load_track(tracks[1].id)
-    render.play()
-
-    # track 1 continues playing...
-
+    show_status(render, "stop()")
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
