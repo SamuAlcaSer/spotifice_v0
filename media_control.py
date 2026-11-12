@@ -5,7 +5,7 @@ from time import sleep
 
 import Ice
 
-Ice.loadSlice(f'-I{Ice.getSliceDir()} spotifice_v0.ice')
+Ice.loadSlice(f'-I{Ice.getSliceDir()} spotifice_v2.ice')
 import Spotifice  # type: ignore # noqa: E402
 
 
@@ -26,35 +26,53 @@ def get_proxy(ic, property, cls):
     return object
 
 
+def show_track(render, step):
+    track = render.get_current_track()
+    print(f"{step:<28} -> {track.title if track else None}")
+
+
 def main(ic):
     provider = get_proxy(ic, 'Spotifice.MediaProvider.Proxy', Spotifice.MediaProviderPrx)
     render = get_proxy(ic, 'Spotifice.MediaRender.Proxy', Spotifice.MediaRenderPrx)
 
-    print("Fetching all tracks...")
-    tracks = provider.get_all_tracks()
-    for t in tracks:
-        print(f"- {t.title}")
+    print("Fetching all playlists...")
+    playlists = provider.get_all_playlists()
+    for p in playlists:
+        print(f"- {p.name} ({p.id})")
 
-    if not tracks:
-        print("No tracks found.")
+    if not playlists:
+        print("No playlists found.")
         return
 
-    print(f"Requesting info for track {tracks[0].id}")
-    print(f"Track title: {tracks[0].title}")
-
     render.bind_media_provider(provider)
-    render.stop()
 
-    print("Loading track into MediaRender...")
-    render.load_track(tracks[0].id)
+    render.load_playlist(playlists[0].id)
+    show_track(render, "load_playlist()")
+
     render.play()
-    sleep(5)  # Let it play for 5 seconds
+    show_track(render, "play()")
+    sleep(3)
+
+    render.next()
+    show_track(render, "next()")
+    sleep(3)
 
     render.stop()
-    render.load_track(tracks[1].id)
-    render.play()
+    show_track(render, "stop()")
 
-    # track 1 continues playing...
+    render.previous()
+    show_track(render, "previous()")
+
+    render.play()
+    show_track(render, "play()")
+    sleep(3)
+
+    render.set_repeat(True)
+    render.next()
+    show_track(render, "set_repeat(True) + next()")
+    sleep(3)
+
+    render.stop()
 
 
 if __name__ == '__main__':

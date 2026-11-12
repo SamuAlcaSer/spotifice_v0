@@ -1,4 +1,7 @@
+import json
+import tempfile
 from pathlib import Path
+from time import sleep
 
 from media_provider import main as provider_main
 from media_render import Spotifice
@@ -18,12 +21,16 @@ class TestRender(IceTestCase):
     render_port = 10001
     render_identity = 'mediaRender0'
 
+    def extra_provider_props(self):
+        return {}
+
     def setUp(self):
         provider_props = {
             'Spotifice.MediaProviderAdapter.Endpoints': f'tcp -p {self.provider_port}',
             'Spotifice.MediaProvider.Content': str(MEDIA),
             'Spotifice.MediaProvider.Identity': self.provider_identity
         }
+        provider_props.update(self.extra_provider_props())
         provider_strprx = f'{self.provider_identity}:tcp -p {self.provider_port} -t 500'
         self.create_server(provider_main, provider_props)
 
@@ -93,3 +100,207 @@ class PlaybackTestsBase(TestRender):
         self.sut.load_track(identify(MEDIA / '2s.mp3'))
 
         self.assertEqual(self.sut.get_current_track().id, identify(MEDIA / '2s.mp3'))
+
+
+# --- Playlists (ejercicio 2) ---
+
+class PlaylistTestsBase(TestRender):
+    def extra_provider_props(self):
+        """Prepara playlists de prueba en un directorio temporal."""
+        self.t1 = identify(MEDIA / '1s.mp3')
+        self.t2 = identify(MEDIA / '2s.mp3')
+        self.t3 = identify(MEDIA / '4s.mp3')
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = Path(tmp.name)
+
+        playlists = {
+            'abc': [self.t1, self.t2, self.t3],
+            'empty': [],
+            'pair': [self.t1, self.t3],
+            'single': [self.t1],
+        }
+        for playlist_id, track_ids in playlists.items():
+            data = {
+                'id': playlist_id,
+                'name': playlist_id,
+                'description': '',
+                'owner': 'Tester',
+                'created_at': '01-01-2026',
+                'track_ids': track_ids,
+            }
+            (folder / f'{playlist_id}.playlist').write_text(json.dumps(data))
+
+        return {'Spotifice.MediaProvider.Playlists': str(folder)}
+
+    def setUp(self):
+        super().setUp()
+        self.bind()
+
+    def current_id(self):
+        track = self.sut.get_current_track()
+        return track.id if track else None
+
+    def is_playing(self):
+        """Si estaba parado lo deja parado (play() solo falla si ya está sonando)."""
+        try:
+            self.sut.play()
+        except Spotifice.PlayerError:
+            return True
+
+        self.sut.stop()
+        return False
+
+    # --- load_playlist ---
+
+    def test_load_playlist_loads_the_first_track(self):
+        self.sut.load_playlist('abc')
+
+        self.assertEqual(self.current_id(), self.t1)
+        self.assertFalse(self.is_playing())
+
+    def test_load_unknown_playlist(self):
+        with self.assertRaises(Spotifice.PlaylistError) as cm:
+            self.sut.load_playlist('bad-playlist-id')
+
+        self.assertEqual(cm.exception.reason, 'Playlist not found')
+        self.assertIsNone(self.current_id())
+
+    def test_load_empty_playlist_does_not_change_the_player(self):
+        self.sut.load_track(self.t3)
+
+        with self.assertRaises(Spotifice.PlaylistError):
+            self.sut.load_playlist('empty')
+
+        self.assertEqual(self.current_id(), self.t3)
+
+    # --- next / previous ---
+
+    def test_next_and_previous_without_playlist_do_nothing(self):
+        self.sut.load_track(self.t2)
+
+        self.sut.next()
+        self.assertEqual(self.current_id(), self.t2)
+
+        self.sut.previous()
+        self.assertEqual(self.current_id(), self.t2)
+
+    def test_next(self):
+        self.sut.load_playlist('abc')
+
+        self.sut.next()
+        self.assertEqual(self.current_id(), self.t2)
+
+        self.sut.next()
+        self.assertEqual(self.current_id(), self.t3)
+
+    def test_next_at_the_last_track_does_nothing(self):
+        self.sut.load_playlist('abc')
+        self.sut.next()
+        self.sut.next()
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t3)
+
+    def test_next_at_the_last_track_with_repeat_goes_to_the_first(self):
+        self.sut.load_playlist('abc')
+        self.sut.set_repeat(True)
+        self.sut.next()
+        self.sut.next()
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t1)
+
+    def test_previous(self):
+        self.sut.load_playlist('abc')
+        self.sut.next()
+        self.sut.next()
+
+        self.sut.previous()
+
+        self.assertEqual(self.current_id(), self.t2)
+
+    def test_previous_at_the_first_track_does_nothing_even_with_repeat(self):
+        self.sut.load_playlist('abc')
+        self.sut.set_repeat(True)
+
+        self.sut.previous()
+
+        self.assertEqual(self.current_id(), self.t1)
+
+    def test_next_while_playing_keeps_playing(self):
+        self.sut.load_playlist('abc')
+        self.sut.play()
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t2)
+        self.assertTrue(self.is_playing())
+
+    def test_next_while_stopped_keeps_stopped(self):
+        self.sut.load_playlist('abc')
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t2)
+        self.assertFalse(self.is_playing())
+
+    # --- La playlist se descarta ---
+
+    def test_load_track_discards_the_playlist(self):
+        self.sut.load_playlist('abc')
+        self.sut.load_track(self.t3)
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t3)
+
+    def test_bind_discards_the_playlist(self):
+        self.sut.load_playlist('abc')
+        self.bind()
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t1)
+
+    def test_unbind_discards_the_playlist(self):
+        self.sut.load_playlist('abc')
+        self.sut.unbind_media_provider()
+        self.bind()
+
+        self.sut.next()
+
+        self.assertEqual(self.current_id(), self.t1)
+
+    # --- Fin de pista ---
+
+    def test_track_end_loads_the_next_one_and_keeps_playing(self):
+        self.sut.load_playlist('pair')  # 1s + 4s
+        self.sut.play()
+
+        sleep(2.5)
+
+        self.assertEqual(self.current_id(), self.t3)
+        self.assertTrue(self.is_playing())
+
+    def test_last_track_end_without_repeat_stops(self):
+        self.sut.load_playlist('single')  # 1s
+        self.sut.play()
+
+        sleep(3)
+
+        self.assertEqual(self.current_id(), self.t1)
+        self.assertFalse(self.is_playing())
+
+    def test_last_track_end_with_repeat_starts_again(self):
+        self.sut.load_playlist('single')  # 1s
+        self.sut.set_repeat(True)
+        self.sut.play()
+
+        sleep(3)
+
+        self.assertEqual(self.current_id(), self.t1)
+        self.assertTrue(self.is_playing())

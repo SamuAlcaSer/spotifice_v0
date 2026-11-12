@@ -13,7 +13,7 @@ from Ice import identityToString as id2str
 
 from gst_player import GstPlayer
 
-Ice.loadSlice(f'-I{Ice.getSliceDir()} spotifice_v0.ice')
+Ice.loadSlice(f'-I{Ice.getSliceDir()} spotifice_v2.ice')
 import Spotifice  # type: ignore # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +25,10 @@ class MediaRenderI(Spotifice.MediaRender):
         self.player = player
         self.provider = None
         self.current_track = None
+
+        self.playlist = None  # Playlist cargada (None si no hay ninguna)
+        self.playlist_pos = 0  # posición de la pista actual dentro de la playlist
+        self.is_repeating = False
 
     def ensure_player_stopped(self):
         if self.player.is_playing():
@@ -44,6 +48,7 @@ class MediaRenderI(Spotifice.MediaRender):
             raise Spotifice.BadReference(reason=f"MediaProvider not reachable: {e}")
 
         self.provider = media_provider
+        self.playlist = None
         logger.info(f"Bound to MediaProvider '{id2str(media_provider.ice_getIdentity())}'")
 
     def unbind_media_provider(self, current=None):
@@ -53,6 +58,7 @@ class MediaRenderI(Spotifice.MediaRender):
             logger.error(f"Unbinding despite stop failure: {e.reason}")
 
         self.provider = None
+        self.playlist = None
         logger.info("Unbound MediaProvider")
 
     # --- ContentManager ---
@@ -61,8 +67,8 @@ class MediaRenderI(Spotifice.MediaRender):
         self.ensure_provider_bound()
 
         try:
-            with self.keep_playing_state(current):
-                self.current_track = self.provider.get_track_info(track_id)
+            self.change_track(track_id, current)
+            self.playlist = None  # cargar una pista suelta descarta la playlist
 
             logger.info(f"Current track set to: {self.current_track.title}")
 
@@ -72,6 +78,41 @@ class MediaRenderI(Spotifice.MediaRender):
 
     def get_current_track(self, current=None):
         return self.current_track
+
+    def load_playlist(self, playlist_id, current=None):
+        self.ensure_provider_bound()
+
+        playlist = self.provider.get_playlist(playlist_id)  # PlaylistError si no existe
+        if not playlist.track_ids:
+            raise Spotifice.PlaylistError(playlist_id, "Playlist is empty")
+
+        # Primero se cambia la pista; si falla, la playlist anterior no se toca
+        self.change_track(playlist.track_ids[0], current)
+        self.playlist = playlist
+        self.playlist_pos = 0
+
+        logger.info(f"Playlist loaded: {playlist.name}")
+
+    def change_track(self, track_id, current):
+        """Cambia la pista actual conservando el estado del reproductor."""
+        with self.keep_playing_state(current):
+            self.current_track = self.provider.get_track_info(track_id)
+
+    def go_to(self, position, current):
+        """Salta a la pista de la playlist que está en esa posición."""
+        self.change_track(self.playlist.track_ids[position], current)
+        self.playlist_pos = position
+
+    def next_position(self):
+        """Posición de la pista siguiente en la playlist, o None si no hay."""
+        if self.playlist is None:
+            return None
+
+        position = self.playlist_pos + 1
+        if position < len(self.playlist.track_ids):
+            return position
+
+        return 0 if self.is_repeating else None
 
     # --- PlaybackController ---
 
@@ -102,9 +143,27 @@ class MediaRenderI(Spotifice.MediaRender):
             logger.error(f"Error starting stream: {e.reason}")
             raise Spotifice.StreamError(reason="Strean setup failed")
 
-        self.player.play(self.chunk_reader(current.id))
+        self.player.play(
+            self.chunk_reader(current.id),
+            lambda: self.on_track_exhausted(current))
         if not self.player.confirm_play_starts():
             raise Spotifice.PlayerError(reason="Failed to confirm playback")
+
+    def on_track_exhausted(self, current):
+        """El player avisa de que la pista ha terminado (se ejecuta en otro hilo).
+
+        El player ya ha detenido su flujo, así que si no hay pista siguiente
+        (sin playlist, o última sin repetición) no hay nada más que hacer.
+        """
+        position = self.next_position()
+        if position is None:
+            return
+
+        try:
+            self.go_to(position, current)
+            self.play(current)
+        except Exception as e:
+            logger.error(f"Could not play the next track: {e}")
 
     def chunk_reader(self, render_id):
         provider = self.provider
@@ -127,6 +186,21 @@ class MediaRenderI(Spotifice.MediaRender):
             raise Spotifice.PlayerError(reason="Failed to confirm stop")
 
         logger.info("Stopped")
+
+    def next(self, current=None):
+        position = self.next_position()
+        if position is not None:
+            self.go_to(position, current)
+
+    def previous(self, current=None):
+        if self.playlist is None or self.playlist_pos == 0:
+            return  # sin playlist, o ya en la primera pista (aunque haya repetición)
+
+        self.go_to(self.playlist_pos - 1, current)
+
+    def set_repeat(self, enabled, current=None):
+        self.is_repeating = enabled
+        logger.info(f"Repeat {'enabled' if enabled else 'disabled'}")
 
 
 def shutdown_on_interrupt(ic):
